@@ -1,0 +1,415 @@
+from sage.all import *
+from itertools import combinations, product
+from collections import Counter
+from math import gcd
+from functools import reduce
+
+def powerset(X):
+    X = tuple(sorted(X))
+    for r in range(len(X) + 1):
+        for A in combinations(X, r):
+            yield frozenset(A)
+
+def ordered_four_partitions(N):
+    N = tuple(sorted(N))
+    for assn in product(range(4), repeat=len(N)):
+        parts = [set() for _ in range(4)]
+        for x, t in zip(N, assn):
+            parts[t].add(x)
+        yield tuple(frozenset(p) for p in parts)
+
+def subset_key(S):
+    return (len(S), tuple(sorted(S)))
+
+def primitive_integer_vector(v):
+    v = [QQ(x) for x in v]
+    if len(v) == 0:
+        return tuple()
+    if all(x == 0 for x in v):
+        return tuple(ZZ(0) for _ in v)
+    L = lcm([x.denominator() for x in v])
+    w = [ZZ(x * L) for x in v]
+    G = reduce(gcd, [abs(x) for x in w if x != 0])
+    w = [x // G for x in w]
+    for x in w:
+        if x != 0:
+            if x < 0:
+                w = [-y for y in w]
+            break
+    return tuple(w)
+
+class FnefConeMgn:
+    def __init__(self, g, n):
+        if 2*g - 2 + n <= 0:
+            raise ValueError("Need 2g - 2 + n > 0.")
+        self.g = ZZ(g)
+        self.n = ZZ(n)
+        self.N = frozenset(range(1, n + 1))
+        self.gens = []
+        self.idx = {}
+        self._cone_cache = None
+        self._build_generators()
+        self.relations = self._build_relations()
+        self.section = self._quotient_section()
+        self.ineqs, self.ineq_labels = self._build_fcurve_inequalities()
+
+    def _add_gen(self, key):
+        if key not in self.idx:
+            self.idx[key] = len(self.gens)
+            self.gens.append(key)
+
+    def _unit(self, key):
+        v = vector(QQ, len(self.gens))
+        v[self.idx[key]] = QQ(1)
+        return v
+
+    def _zero(self):
+        return vector(QQ, len(self.gens))
+
+    def _stable_component(self, h, marks, nodes=1):
+        return 2*h - 2 + marks + nodes > 0
+
+    def _actual_delta_valid(self, i, S):
+        S = frozenset(S)
+        if not (0 <= i <= self.g):
+            return False
+        return (
+            self._stable_component(i, len(S), 1)
+            and self._stable_component(self.g - i, self.n - len(S), 1)
+        )
+
+    def _canonical_delta_key(self, i, S):
+        S = frozenset(S)
+        T = self.N - S
+        j = self.g - i
+        if j < i:
+            return (j, T)
+        if j > i:
+            return (i, S)
+        if subset_key(T) < subset_key(S):
+            return (j, T)
+        return (i, S)
+
+    def _build_generators(self):
+        if self.g >= 1:
+            self._add_gen(("lambda",))
+
+        for p in sorted(self.N):
+            self._add_gen(("psi", p))
+
+        if self.g >= 1:
+            self._add_gen(("delta_irr",))
+
+        seen = set()
+        for i in range(self.g + 1):
+            for S in powerset(self.N):
+                if self._actual_delta_valid(i, S):
+                    h, T = self._canonical_delta_key(i, S)
+                    key = ("delta", h, tuple(sorted(T)))
+                    if key not in seen:
+                        seen.add(key)
+                        self._add_gen(key)
+
+    def _delta_unit_if_exists(self, i, S):
+        if not self._actual_delta_valid(i, S):
+            return None
+        h, T = self._canonical_delta_key(i, S)
+        key = ("delta", h, tuple(sorted(T)))
+        if key not in self.idx:
+            return None
+        return self._unit(key)
+
+    def _b_form(self, i, S):
+        S = frozenset(S)
+        if not (0 <= i <= self.g):
+            return None
+
+        h, T = self._canonical_delta_key(i, S)
+
+        if h == 0 and len(T) == 1:
+            p = next(iter(T))
+            return self._unit(("psi", p))
+
+        u = self._delta_unit_if_exists(h, T)
+        if u is not None:
+            return -u
+
+        return None
+
+    def _a_form(self):
+        if ("lambda",) in self.idx:
+            return self._unit(("lambda",))
+        return self._zero()
+
+    def _birr_form(self):
+        if ("delta_irr",) in self.idx:
+            return -self._unit(("delta_irr",))
+        return None
+
+    def _relation_vec(self):
+        return vector(QQ, len(self.gens))
+
+    def _build_relations(self):
+        rels = []
+
+        if self.g == 2:
+            r = self._relation_vec()
+            r[self.idx[("lambda",)]] += 10
+            r[self.idx[("delta_irr",)]] -= 1
+            for key in self.gens:
+                if key[0] == "delta" and key[1] == 1:
+                    r[self.idx[key]] -= 2
+            rels.append(r)
+
+        if self.g == 1:
+            r = self._relation_vec()
+            r[self.idx[("lambda",)]] += 12
+            r[self.idx[("delta_irr",)]] -= 1
+            rels.append(r)
+
+            for p in sorted(self.N):
+                r = self._relation_vec()
+                r[self.idx[("psi", p)]] += 12
+                r[self.idx[("delta_irr",)]] -= 1
+                for S in powerset(self.N):
+                    if p in S and len(S) >= 2:
+                        u = self._delta_unit_if_exists(0, S)
+                        if u is not None:
+                            r -= 12*u
+                rels.append(r)
+
+        if self.g == 0:
+            N = sorted(self.N)
+
+            for z in N:
+                others = [x for x in N if x != z]
+                r = self._relation_vec()
+                r[self.idx[("psi", z)]] += 1
+
+                if len(others) >= 2:
+                    x, y = others[0], others[1]
+                    for S in powerset(self.N):
+                        if z in S and x not in S and y not in S:
+                            u = self._delta_unit_if_exists(0, S)
+                            if u is not None:
+                                r -= u
+
+                rels.append(r)
+
+            for a, b, c, d in combinations(N, 4):
+                r = self._relation_vec()
+                for S in powerset(self.N):
+                    u = self._delta_unit_if_exists(0, S)
+                    if u is None:
+                        continue
+
+                    if a in S and b in S and c not in S and d not in S:
+                        r += u
+                    if a in S and c in S and b not in S and d not in S:
+                        r -= u
+
+                if r != 0:
+                    rels.append(r)
+
+        return rels
+
+    def _quotient_section(self):
+        m = len(self.gens)
+        if not self.relations:
+            return identity_matrix(QQ, m)
+
+        R = matrix(QQ, self.relations)
+        E = R.echelon_form()
+        piv = list(E.pivots())
+        free = [j for j in range(m) if j not in piv]
+
+        S = matrix(QQ, m, len(free), 0)
+        for col, j in enumerate(free):
+            S[j, col] = 1
+
+        for row, p in enumerate(piv):
+            for col, j in enumerate(free):
+                S[p, col] = -E[row, j] / E[row, p]
+
+        return S
+
+    def _add_ineq(self, rows, labels, seen, label, v):
+        if v is None or v == 0:
+            return
+
+        qv = vector(QQ, list(v * self.section))
+        if qv == 0:
+            return
+
+        t = primitive_integer_vector(qv)
+        if t not in seen:
+            seen.add(t)
+            rows.append(qv)
+            labels.append(label)
+
+    def _build_fcurve_inequalities(self):
+        rows, labels, seen = [], [], set()
+        g, N = self.g, self.N
+        birr = self._birr_form()
+
+        # Type 1: elliptic tails.
+        if g >= 1 and birr is not None:
+            b10 = self._b_form(1, frozenset())
+            if b10 is not None:
+                v = self._a_form() - 12*birr + b10
+            else:
+                v = self._a_form() - 12*birr
+            self._add_ineq(rows, labels, seen, "T1_elliptic_tail", v)
+
+        # Type 2: a(Z) = {4}; only for g >= 3.
+        if g >= 3 and birr is not None:
+            self._add_ineq(rows, labels, seen, "T2_fourfold_irreducible", birr)
+
+        # Type 3: a(Z) = {3,1}; b_{i,I} >= 0, 0 <= i <= g-2.
+        if g >= 2:
+            for i in range(0, g - 1):
+                for I in powerset(N):
+                    if i == 0 and len(I) == 0:
+                        continue
+                    b = self._b_form(i, I)
+                    if b is not None:
+                        self._add_ineq(rows, labels, seen, "T3_three_one", b)
+
+        # Type 4: a(Z) = {2,2}; 2 b_irr >= b_{i,I}, 1 <= i <= g-1.
+        if g >= 3 and birr is not None:
+            for i in range(1, g):
+                for I in powerset(N):
+                    b = self._b_form(i, I)
+                    if b is not None:
+                        self._add_ineq(rows, labels, seen, "T4_two_two", 2*birr - b)
+
+        if g == 2:
+            for i in range(1, g):
+                for I in powerset(N):
+                    b = self._b_form(i, I)
+                    if b is not None:
+                        self._add_ineq(rows, labels, seen, "T4_two_two", 2*birr - b)
+
+        # Type 5: a(Z) = {2,1,1}.
+        if g >= 1:
+            for i in range(g):
+                for j in range(g):
+                    if i + j > g - 1:
+                        continue
+                    for I in powerset(N):
+                        if i == 0 and len(I) == 0:
+                            continue
+                        for J in powerset(N - I):
+                            if j == 0 and len(J) == 0:
+                                continue
+
+                            b1 = self._b_form(i, I)
+                            b2 = self._b_form(j, J)
+                            b3 = self._b_form(i + j, I | J)
+
+                            if b1 is not None and b2 is not None and b3 is not None:
+                                self._add_ineq(
+                                    rows, labels, seen,
+                                    "T5_two_one_one",
+                                    b1 + b2 - b3
+                                )
+
+        # Type 6: a(Z) = {1,1,1,1}.
+        for i in range(g + 1):
+            for j in range(g + 1 - i):
+                for k in range(g + 1 - i - j):
+                    l = g - i - j - k
+
+                    for I, J, K, L in ordered_four_partitions(N):
+                        if i == 0 and len(I) == 0:
+                            continue
+                        if j == 0 and len(J) == 0:
+                            continue
+                        if k == 0 and len(K) == 0:
+                            continue
+                        if l == 0 and len(L) == 0:
+                            continue
+
+                        b_i = self._b_form(i, I)
+                        b_j = self._b_form(j, J)
+                        b_k = self._b_form(k, K)
+                        b_l = self._b_form(l, L)
+                        b_ij = self._b_form(i + j, I | J)
+                        b_ik = self._b_form(i + k, I | K)
+                        b_il = self._b_form(i + l, I | L)
+
+                        terms = [b_i, b_j, b_k, b_l, b_ij, b_ik, b_il]
+                        if any(t is None for t in terms):
+                            continue
+
+                        v = b_i + b_j + b_k + b_l - b_ij - b_ik - b_il
+                        self._add_ineq(rows, labels, seen, "T6_one_one_one_one", v)
+
+        return rows, labels
+
+    def cone(self):
+        if self._cone_cache is not None:
+            return self._cone_cache
+
+        d = self.section.ncols()
+        ieqs = [[QQ(0)] + list(v) for v in self.ineqs]
+        self._cone_cache = Polyhedron(ieqs=ieqs, ambient_dim=d, base_ring=QQ)
+        return self._cone_cache
+
+    def _standard_vector_to_dict(self, v, include_zero=False):
+        out = {}
+        for key, coeff in zip(self.gens, v):
+            coeff = QQ(coeff)
+            if coeff != 0 or include_zero:
+                out[key] = coeff
+        return out
+
+    def extreme_rays(self, include_zero=False):
+        P = self.cone()
+        rays = []
+
+        for r in P.rays():
+            q = vector(QQ, list(r.vector()))
+            v = vector(QQ, list(self.section * q))
+            v = vector(QQ, primitive_integer_vector(v))
+            rays.append(self._standard_vector_to_dict(v, include_zero=include_zero))
+
+        return rays
+
+    def lines(self, include_zero=False):
+        P = self.cone()
+        lines = []
+
+        for ell in P.lines():
+            q = vector(QQ, list(ell.vector()))
+            v = vector(QQ, list(self.section * q))
+            v = vector(QQ, primitive_integer_vector(v))
+            lines.append(self._standard_vector_to_dict(v, include_zero=include_zero))
+
+        return lines
+
+    def summary(self):
+        P = self.cone()
+        return {
+            "g": self.g,
+            "n": self.n,
+            "picard_generators": self.gens,
+            "quotient_dimension": self.section.ncols(),
+            "num_relations": len(self.relations),
+            "num_fcurve_inequalities": len(self.ineqs),
+            "inequality_types": dict(Counter(self.ineq_labels)),
+            "num_extreme_rays": len(P.rays()),
+            "num_lines": len(P.lines()),
+        }
+
+def f_nef_extreme_rays(g, n, include_zero=False):
+    C = FnefConeMgn(g, n)
+    return {
+        "summary": C.summary(),
+        "rays": C.extreme_rays(include_zero=include_zero),
+        "lines": C.lines(include_zero=include_zero),
+    }
+
+ans = f_nef_extreme_rays(4, 0)
+ans["summary"]
+ans["rays"]
